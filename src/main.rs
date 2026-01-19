@@ -165,9 +165,9 @@ impl Service {
     }
 }
 
-fn run(tunnels: &Vec<(&str, u16, ServiceType)>) {
+fn run(tunnels: &[(String, u16, ServiceType)]) {
     let (mut tunnels, services): (Vec<Tunnel>, Vec<Service>)  = tunnels.iter().map(|(service, port, service_type)| {
-        let mut tunnel = Tunnel::new(service.to_string(), *port);
+        let mut tunnel = Tunnel::new(service.clone(), *port);
         let service = Service::new(*service_type, *port);
         tunnel.start();
         (tunnel, service)
@@ -205,11 +205,14 @@ fn kill_tunnels() {
 
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let write_mode = args.iter().any(|arg| arg == "--write");
+    let suffix = if write_mode { "" } else { "replica" };
     let tunnels = vec![
-        ("primaryredisreplica", 6001, ServiceType::Redis),
-        ("secondaryredisreplica", 6002, ServiceType::Redis),
-        ("optionsredisreplica", 6003, ServiceType::Redis),
-        ("optionsconfigdb", 5608, ServiceType::Postgres),
+        (format!("primaryredis{}", suffix), 6001, ServiceType::Redis),
+        (format!("secondaryredis{}", suffix), 6002, ServiceType::Redis),
+        (format!("optionsredis{}", suffix), 6003, ServiceType::Redis),
+        ("optionsconfigdb".to_string(), 5608, ServiceType::Postgres),
     ];
     loop {
         kill_tunnels();
