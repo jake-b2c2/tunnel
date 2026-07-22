@@ -1,6 +1,8 @@
 APP_NAME    := Tunnel
 BUNDLE      := dist/$(APP_NAME).app
-INSTALL_DIR := /Applications
+# Per-user install by default (no admin needed, works on managed Macs).
+# Override for a system-wide install: sudo make install INSTALL_DIR=/Applications
+INSTALL_DIR ?= $(HOME)/Applications
 INSTALLED   := $(INSTALL_DIR)/$(APP_NAME).app
 EXEC_MATCH  := $(APP_NAME).app/Contents/MacOS/tunnel
 
@@ -11,6 +13,7 @@ help:
 	@echo ""
 	@echo "  make build      Build the release binary and assemble $(BUNDLE)"
 	@echo "  make install    Build and install to $(INSTALL_DIR), then launch"
+	@echo "                  (override: sudo make install INSTALL_DIR=/Applications)"
 	@echo "  make uninstall  Quit, remove login item, delete $(INSTALLED)"
 	@echo "  make run        Build and run from ./dist (for testing)"
 	@echo "  make icons      Regenerate icons (needs librsvg: brew install librsvg)"
@@ -26,6 +29,7 @@ install: build
 	@echo "==> Stopping any running instance"
 	-@pkill -f "$(EXEC_MATCH)" 2>/dev/null || true
 	@echo "==> Installing to $(INSTALL_DIR)"
+	mkdir -p "$(INSTALL_DIR)"
 	rm -rf "$(INSTALLED)"
 	cp -R "$(BUNDLE)" "$(INSTALLED)"
 	@echo "==> Launching"

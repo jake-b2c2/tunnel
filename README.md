@@ -37,15 +37,21 @@ make install
 ```
 
 `make install` builds a release binary, assembles `Tunnel.app`, copies it to
-`/Applications`, and launches it. Look for the tunnel-arch icon in your menu
-bar.
+`~/Applications` (per-user, so no admin rights are needed — works on managed
+Macs), and launches it. Look for the tunnel-arch icon in your menu bar.
+
+To install system-wide instead:
+
+```sh
+sudo make install INSTALL_DIR=/Applications
+```
 
 Other targets:
 
 ```sh
 make build      # build + assemble ./dist/Tunnel.app (no install)
 make run        # build + run from ./dist (for testing)
-make uninstall  # quit, remove the login item, delete /Applications/Tunnel.app
+make uninstall  # quit, remove the login item, delete ~/Applications/Tunnel.app
 make help       # list everything
 ```
 
