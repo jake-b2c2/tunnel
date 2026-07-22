@@ -17,12 +17,18 @@ done
 echo "==> Building release binary"
 cargo build --release
 
+# Resolve the real target directory from cargo (honors CARGO_TARGET_DIR and
+# any [build] target-dir in a cargo config), rather than assuming ./target.
+TARGET_DIR="$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
+    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+TARGET_DIR="${TARGET_DIR:-target}"
+
 APP="dist/Tunnel.app"
 echo "==> Assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Info.plist "$APP/Contents/Info.plist"
-cp target/release/tunnel "$APP/Contents/MacOS/tunnel"
+cp "$TARGET_DIR/release/tunnel" "$APP/Contents/MacOS/tunnel"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 # Ad-hoc codesign so Gatekeeper is happy with a locally built app.
