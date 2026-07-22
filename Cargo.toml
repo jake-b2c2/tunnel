@@ -3,10 +3,14 @@ name = "tunnel"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "tunnel"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0"
-tokio = { version = "1.32", features = ["full"] }
-futures = "0.3"
-ctrlc = "3.5.0"
 derive-new = "0.5"
 wait-timeout = "0.2.1"
+tao = "0.30"
+tray-icon = "0.19"
+image = { version = "0.25", default-features = false, features = ["png"] }

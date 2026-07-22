@@ -1,0 +1,12 @@
+# Rust build output
+/target
+
+# Assembled app bundle
+/dist
+
+# Icon build intermediates (final PNGs + .icns ARE committed)
+/assets/build
+
+# macOS / editor cruft
+.DS_Store
+/.idea
