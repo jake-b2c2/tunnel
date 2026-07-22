@@ -20,10 +20,11 @@ EOF
 }
 
 declare -A STATES=(
-  [running]="#34C759"   # green
-  [stopped]="#8E8E93"   # gray
-  [reconnecting]="#FF9F0A" # amber
-  [alert]="#FF3B30"     # red
+  [running]="#34C759"       # green  — running, read-only (replica)
+  [running_write]="#0A84FF" # blue   — running, write (primary)
+  [stopped]="#8E8E93"       # gray   — stopped
+  [reconnecting]="#FF9F0A"  # amber  — starting / logging in / reconnecting
+  [alert]="#FF3B30"         # red    — needs login / error
 )
 
 for name in "${!STATES[@]}"; do

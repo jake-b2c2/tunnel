@@ -8,7 +8,8 @@ The menu-bar icon is color-coded so you can see the state at a glance:
 
 | Icon | State |
 |------|-------|
-| 🟢 green | Running — all tunnels up and healthy |
+| 🟢 green | Running — read-only (replica) |
+| 🔵 blue | Running — write mode (primary) |
 | ⚪️ gray | Stopped |
 | 🟠 amber | Starting / logging in / reconnecting |
 | 🔴 red | Needs AWS login, or an error |
@@ -71,7 +72,11 @@ Click the menu-bar icon:
   automatically (it starts idle; press Start to bring up tunnels — or leave
   it and Start yourself).
 - **Open logs** — opens `~/Library/Logs/Tunnel/tunnel.log`.
-- **Quit** — stop tunnels and exit.
+- **Quit** — stop tunnels and exit the app entirely.
+
+To restart after Quit, launch it again: `open ~/Applications/Tunnel.app`, or
+find "Tunnel" in Spotlight / `~/Applications`. If **Start at login** is
+checked it also comes back automatically at your next login.
 
 ### First-launch permissions
 

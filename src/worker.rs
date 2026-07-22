@@ -353,6 +353,8 @@ fn start_and_monitor<R: Fn(Event)>(
         cleanup(&mut tunnels);
         return end;
     }
+    // Tell the UI the effective read/write mode so the icon color is correct.
+    report(Event::WriteMode(write_mode));
     report(Event::Status(Status::Running));
 
     loop {
