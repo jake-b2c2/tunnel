@@ -11,11 +11,15 @@ use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::mpsc::{Receiver, RecvTimeoutError},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use derive_new::new;
 use wait_timeout::ChildExt;
+
+/// How long write (primary) mode stays active before auto-reverting to
+/// read-only, as a safety guard against leaving write access on.
+const WRITE_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// High-level state of the worker, surfaced to the menu-bar UI.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +48,16 @@ pub enum Cmd {
     /// Toggle write (primary) vs replica targets. Applies on next Start.
     SetWriteMode(bool),
     Quit,
+}
+
+/// Messages sent from the worker back to the UI thread.
+#[derive(Clone, Debug)]
+pub enum Event {
+    /// A state transition — update the icon color and menu text.
+    Status(Status),
+    /// Write mode changed under the worker's control (the 30-min auto-revert),
+    /// so the UI checkbox must follow.
+    WriteMode(bool),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -208,18 +222,22 @@ enum SessionEnd {
     Stopped,
     Quit,
     Restart(bool),  // write-mode changed; rebuild with this write_mode
+    WriteTimeout,   // write mode hit its TTL; revert to read-only
     Failed(String), // tunnels/pings dropped
 }
 
 /// The worker entry point. Blocks forever handling commands.
 ///
-/// `report` is called on every state transition so the UI can update the
-/// icon color and menu text.
-pub fn run<R: Fn(Status)>(cmd_rx: Receiver<Cmd>, report: R) {
+/// `report` is called on every state transition (and on the write-mode
+/// auto-revert) so the UI can update the icon, menu text, and checkbox.
+pub fn run<R: Fn(Event)>(cmd_rx: Receiver<Cmd>, report: R) {
     let mut write_mode = false;
+    // Absolute instant at which write mode reverts to read-only. Held across
+    // reconnects so a dropped tunnel doesn't reset the 30-minute clock.
+    let mut write_deadline: Option<Instant> = None;
 
     'idle: loop {
-        report(Status::Stopped);
+        report(Event::Status(Status::Stopped));
         // Block until told to start (or quit).
         loop {
             match cmd_rx.recv() {
@@ -234,15 +252,23 @@ pub fn run<R: Fn(Status)>(cmd_rx: Receiver<Cmd>, report: R) {
         // needed, until the user stops or write-mode changes.
         let mut backoff = 1u64;
         'session: loop {
-            report(Status::Starting);
+            // Arm (or disarm) the write-mode TTL. Only set it when not already
+            // armed, so reconnects keep counting down from the original start.
+            match (write_mode, write_deadline) {
+                (true, None) => write_deadline = Some(Instant::now() + WRITE_TTL),
+                (false, _) => write_deadline = None,
+                _ => {}
+            }
+
+            report(Event::Status(Status::Starting));
             kill_tunnels();
 
             // Ensure we're authenticated.
             if !is_logged_in() {
-                report(Status::LoggingIn);
+                report(Event::Status(Status::LoggingIn));
                 notify("Tunnel", "AWS session expired — opening login…");
                 if !login() || !is_logged_in() {
-                    report(Status::NeedsLogin);
+                    report(Event::Status(Status::NeedsLogin));
                     notify(
                         "Tunnel",
                         "AWS login required. Open the menu and press Start.",
@@ -252,7 +278,7 @@ pub fn run<R: Fn(Status)>(cmd_rx: Receiver<Cmd>, report: R) {
                 }
             }
 
-            match start_and_monitor(write_mode, &cmd_rx, &report) {
+            match start_and_monitor(write_mode, write_deadline, &cmd_rx, &report) {
                 SessionEnd::Stopped => continue 'idle,
                 SessionEnd::Quit => return,
                 SessionEnd::Restart(w) => {
@@ -260,8 +286,19 @@ pub fn run<R: Fn(Status)>(cmd_rx: Receiver<Cmd>, report: R) {
                     backoff = 1;
                     continue 'session;
                 }
+                SessionEnd::WriteTimeout => {
+                    write_mode = false;
+                    write_deadline = None;
+                    report(Event::WriteMode(false));
+                    notify(
+                        "Tunnel",
+                        "Write mode expired after 30 min — reverting to read-only.",
+                    );
+                    backoff = 1;
+                    continue 'session;
+                }
                 SessionEnd::Failed(reason) => {
-                    report(Status::Reconnecting);
+                    report(Event::Status(Status::Reconnecting));
                     notify(
                         "Tunnel",
                         &format!("Connection lost ({reason}); reconnecting…"),
@@ -286,8 +323,9 @@ pub fn run<R: Fn(Status)>(cmd_rx: Receiver<Cmd>, report: R) {
 }
 
 /// Start all tunnels, then poll health + commands until something ends it.
-fn start_and_monitor<R: Fn(Status)>(
+fn start_and_monitor<R: Fn(Event)>(
     write_mode: bool,
+    write_deadline: Option<Instant>,
     cmd_rx: &Receiver<Cmd>,
     report: &R,
 ) -> SessionEnd {
@@ -300,7 +338,9 @@ fn start_and_monitor<R: Fn(Status)>(
             for mut t in tunnels {
                 t.kill();
             }
-            report(Status::Error(format!("failed to launch b2c2: {e}")));
+            report(Event::Status(Status::Error(format!(
+                "failed to launch b2c2: {e}"
+            ))));
             notify("Tunnel", "Failed to launch b2c2 tunnel. Is b2c2 on PATH?");
             return SessionEnd::Failed("spawn failed".into());
         }
@@ -313,7 +353,7 @@ fn start_and_monitor<R: Fn(Status)>(
         cleanup(&mut tunnels);
         return end;
     }
-    report(Status::Running);
+    report(Event::Status(Status::Running));
 
     loop {
         // Check for commands first so Stop/Quit are responsive.
@@ -331,6 +371,12 @@ fn start_and_monitor<R: Fn(Status)>(
                 return SessionEnd::Restart(w);
             }
             Ok(Cmd::Start) | Err(_) => {}
+        }
+
+        // Write mode expired?
+        if write_deadline.is_some_and(|dl| Instant::now() >= dl) {
+            cleanup(&mut tunnels);
+            return SessionEnd::WriteTimeout;
         }
 
         // Any tunnel process died?

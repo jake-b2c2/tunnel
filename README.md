@@ -57,7 +57,10 @@ Click the menu-bar icon:
   opens a browser to complete `b2c2 aws login`.
 - **Stop** — tear the tunnels down.
 - **Write mode (primary)** — target the primary DBs instead of the replicas.
-  Off = replica (read-only), the safe default. Takes effect on next start.
+  Off = replica (read-only), the safe default. As a safety guard, write mode
+  **auto-reverts to read-only after 30 minutes** (you get a notification and
+  the checkbox unticks); re-check it to extend. The 30-minute clock survives
+  reconnects, so a dropped tunnel won't silently extend write access.
 - **Start at login** — register the app as a macOS login item so it launches
   automatically (it starts idle; press Start to bring up tunnels — or leave
   it and Start yourself).
