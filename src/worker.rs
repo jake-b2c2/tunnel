@@ -8,6 +8,8 @@
 
 use std::{
     fs::{File, OpenOptions},
+    net::{SocketAddr, TcpStream},
+    os::unix::process::CommandExt,
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::mpsc::{Receiver, RecvTimeoutError},
@@ -81,6 +83,12 @@ impl Tunnel {
         let child = Command::new("b2c2")
             .args(["tunnel", "-e", "prod", "-s", &self.service, "-p"])
             .arg(self.port.to_string())
+            // Run b2c2 (and the aws-cli + session-manager-plugin it spawns) in
+            // its own process group, so teardown can signal exactly this
+            // tunnel's process tree instead of a machine-wide
+            // `killall session-manager-plugin` — which would also tear down
+            // unrelated SSM sessions (a colleague's, or ones started by hand).
+            .process_group(0)
             .stdout(log_stdio())
             .stderr(log_stdio())
             .spawn()?;
@@ -88,9 +96,18 @@ impl Tunnel {
         Ok(())
     }
 
+    /// Tear this tunnel down. b2c2 leads its own process group (see `start`), so
+    /// we signal the whole group and reap the aws-cli + session-manager-plugin
+    /// children with it. SIGTERM first so aws-cli can stop the SSM session
+    /// cleanly, then SIGKILL anything that outlives a short grace period.
     fn kill(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let pgid = child.id() as i32;
+        signal_group(pgid, "TERM");
+        if !matches!(child.wait_timeout(Duration::from_secs(5)), Ok(Some(_))) {
+            signal_group(pgid, "KILL");
             let _ = child.wait();
         }
     }
@@ -115,7 +132,11 @@ impl Service {
     fn ping(&self) -> bool {
         let mut child = match self.spawn() {
             Ok(c) => c,
-            Err(_) => return false,
+            // The health-check tool (redis-cli/psql) isn't installed or
+            // runnable. Don't treat that as a dropped tunnel — fall back to a
+            // plain TCP connect to the forwarded local port, so a missing tool
+            // can't masquerade as a failure and trigger endless reconnects.
+            Err(_) => return self.port_open(),
         };
         match child.wait_timeout(Duration::from_secs(10)) {
             Ok(Some(status)) => status.success(),
@@ -125,6 +146,14 @@ impl Service {
                 false
             }
         }
+    }
+
+    /// Is something accepting TCP connections on the forwarded local port?
+    /// Dependency-free fallback for `ping` when the service-specific tool is
+    /// unavailable — proves the tunnel's local listener is up.
+    fn port_open(&self) -> bool {
+        let addr = SocketAddr::from(([127, 0, 0, 1], self.port));
+        TcpStream::connect_timeout(&addr, Duration::from_secs(5)).is_ok()
     }
 
     fn spawn(&self) -> std::io::Result<Child> {
@@ -157,10 +186,14 @@ fn build_specs(write_mode: bool) -> Vec<(String, u16, ServiceType)> {
     ]
 }
 
-/// Kill any lingering SSM sessions from a previous run.
-fn kill_tunnels() {
-    let _ = Command::new("killall")
-        .arg("session-manager-plugin")
+/// Send `sig` (e.g. "TERM" / "KILL") to an entire process group. The group id
+/// is the group leader's pid, passed to `kill(1)` as a negative number. Scoped
+/// to a single tunnel's process tree — unlike a global `killall`, it never
+/// touches SSM sessions this app didn't spawn.
+fn signal_group(pgid: i32, sig: &str) {
+    let _ = Command::new("kill")
+        .arg(format!("-{sig}"))
+        .arg(format!("-{pgid}"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -261,7 +294,6 @@ pub fn run<R: Fn(Event)>(cmd_rx: Receiver<Cmd>, report: R) {
             }
 
             report(Event::Status(Status::Starting));
-            kill_tunnels();
 
             // Ensure we're authenticated.
             if !is_logged_in() {
@@ -403,7 +435,6 @@ fn cleanup(tunnels: &mut [Tunnel]) {
     for tunnel in tunnels.iter_mut() {
         tunnel.kill();
     }
-    kill_tunnels();
 }
 
 /// Sleep for `secs`, but return early with a SessionEnd if a command arrives.

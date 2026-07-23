@@ -25,8 +25,9 @@ visible state instead.
 - **Rust** (stable): https://rustup.rs
 - **The `b2c2` CLI** on your `PATH` (the app also reads your login-shell
   `PATH`, so wherever your shell finds `b2c2` works).
-- **`redis-cli`** and **`psql`** for the health checks
-  (`brew install redis libpq`).
+- *(optional)* **`redis-cli`** and **`psql`** for richer health checks
+  (`brew install redis libpq`). Without them the app falls back to a plain
+  TCP connect on each forwarded port.
 - macOS 11+ (Apple Silicon or Intel).
 
 ## Build & install
