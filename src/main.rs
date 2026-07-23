@@ -223,6 +223,12 @@ fn main() {
         });
     });
 
+    // Bring the tunnels up automatically on launch (read-only mode), so the app
+    // is useful the moment it starts instead of sitting gray until the user
+    // opens the menu and clicks Start. The worker buffers this until its first
+    // recv. Stop from the menu still holds — this only fires once at startup.
+    let _ = cmd_tx.send(Cmd::Start);
+
     // "Start at login" is controlled entirely by the menu toggle, which
     // reflects the current state on launch — no surprise auto-registration.
 
