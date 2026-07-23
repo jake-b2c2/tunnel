@@ -199,6 +199,50 @@ fn signal_group(pgid: i32, sig: &str) {
         .status();
 }
 
+/// Pids holding a LISTEN socket on `port`. Empty if none, or if `lsof` can't
+/// be run.
+fn listeners_on(port: u16) -> Vec<u32> {
+    let out = match Command::new("lsof")
+        .args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
+        .output()
+    {
+        Ok(out) => out,
+        Err(_) => return Vec::new(),
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect()
+}
+
+/// Free the app's own forwarded ports before (re)spawning tunnels.
+///
+/// A tunnel stranded by a crashed or force-quit run — or by replacing the app
+/// while it was still running — keeps its local listener bound. A fresh
+/// `b2c2 tunnel` on that same port then fails to start (`exit status 255` /
+/// broken pipe), which the supervisor reads as a dropped tunnel and
+/// reconnect-loops on. Clearing our ports first restores the clean slate the
+/// old machine-wide `killall session-manager-plugin` used to give us — but
+/// scoped to exactly the ports this app owns, so it never disturbs SSM sessions
+/// it didn't start. TERM first, then KILL only whatever still holds a port.
+fn reclaim_ports(ports: &[u16]) {
+    let signal = |sig: &str| {
+        for &port in ports {
+            for pid in listeners_on(port) {
+                let _ = Command::new("kill")
+                    .arg(format!("-{sig}"))
+                    .arg(pid.to_string())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+        }
+    };
+    signal("TERM");
+    std::thread::sleep(Duration::from_millis(500));
+    signal("KILL");
+}
+
 fn is_logged_in() -> bool {
     match Command::new("b2c2")
         .args(["aws", "auth", "status"])
@@ -362,6 +406,12 @@ fn start_and_monitor<R: Fn(Event)>(
     report: &R,
 ) -> SessionEnd {
     let specs = build_specs(write_mode);
+    // Clear any leftover listener on one of our own ports before spawning, so a
+    // tunnel stranded by a previous run can't make the fresh one fail to bind
+    // and drive an endless reconnect loop.
+    let ports: Vec<u16> = specs.iter().map(|&(_, port, _)| port).collect();
+    reclaim_ports(&ports);
+
     let mut tunnels: Vec<Tunnel> = Vec::new();
     let mut services: Vec<Service> = Vec::new();
     for (service, port, kind) in specs {
