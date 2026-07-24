@@ -13,6 +13,7 @@ use std::thread;
 
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
@@ -202,7 +203,12 @@ fn fix_path() {
 fn main() {
     fix_path();
 
-    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    // Menu-bar–only app: keep it out of the Dock and the app switcher. The
+    // Info.plist `LSUIElement` covers bundled launches, but Launch Services
+    // caches that key and it doesn't apply to the raw binary, so set the
+    // activation policy at runtime too — this reliably takes effect always.
+    let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    event_loop.set_activation_policy(ActivationPolicy::Accessory);
 
     // Route tray menu clicks into the event loop.
     let menu_proxy = event_loop.create_proxy();
