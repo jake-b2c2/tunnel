@@ -59,12 +59,27 @@ make help       # list everything
 
 ## Usage
 
-Click the menu-bar icon:
+The app supervises **Prod** and **UAT** independently; both can run at once
+on separate local ports:
+
+| Service | Prod | UAT |
+|---|---|---|
+| primaryredis | 6001 | 7001 |
+| secondaryredis | 6002 | 7002 |
+| optionsredis | 6003 | 7003 |
+| optionsconfigdb | 5608 | — (not exposed by `b2c2 tunnel -e uat`) |
+
+Prod starts automatically on launch; UAT is started from its submenu. The
+menu bar shows one icon with the most urgent state across both environments
+(red > amber > blue > green); the menu lists each environment's status.
+
+Click the menu-bar icon, then the **Prod** or **UAT** submenu:
 
 - **Start** — bring the tunnels up. The first time (or after SSO expiry) this
   opens a browser to complete `b2c2 aws login`.
 - **Stop** — tear the tunnels down.
-- **Write mode (primary)** — target the primary DBs instead of the replicas.
+- **Write mode (primary)** *(Prod only)* — target the primary DBs instead of
+  the replicas. UAT always uses the primaries.
   Off = replica (read-only), the safe default. As a safety guard, write mode
   **auto-reverts to read-only after 30 minutes** (you get a notification and
   the checkbox unticks); re-check it to extend. The 30-minute clock survives

@@ -12,6 +12,7 @@ use std::{
     os::unix::process::CommandExt,
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::Mutex,
     sync::mpsc::{Receiver, RecvTimeoutError},
     time::{Duration, Instant},
 };
@@ -22,6 +23,60 @@ use wait_timeout::ChildExt;
 /// How long write (primary) mode stays active before auto-reverting to
 /// read-only, as a safety guard against leaving write access on.
 const WRITE_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// An AWS environment the app can tunnel into. Each runs its own worker and
+/// owns a distinct local port range, so both can be up at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Env {
+    Prod,
+    Uat,
+}
+
+impl Env {
+    pub const ALL: [Env; 2] = [Env::Prod, Env::Uat];
+
+    /// Name passed to `b2c2 tunnel -e`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Env::Prod => "prod",
+            Env::Uat => "uat",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Env::Prod => "Prod",
+            Env::Uat => "UAT",
+        }
+    }
+
+    /// Prod defaults to read-only replicas with an explicit, time-limited
+    /// write mode; UAT always targets the primaries.
+    pub fn allows_write(self) -> bool {
+        matches!(self, Env::Prod)
+    }
+
+    /// Local ports for primary/secondary/options Redis.
+    fn redis_ports(self) -> [u16; 3] {
+        match self {
+            Env::Prod => [6001, 6002, 6003],
+            Env::Uat => [7001, 7002, 7003],
+        }
+    }
+
+    /// Local port for the options config DB, where `b2c2 tunnel` exposes it
+    /// (it doesn't for UAT).
+    fn configdb_port(self) -> Option<u16> {
+        match self {
+            Env::Prod => Some(5608),
+            Env::Uat => None,
+        }
+    }
+
+    fn notify(self, message: &str) {
+        notify(&format!("Tunnel — {}", self.label()), message);
+    }
+}
 
 /// High-level state of the worker, surfaced to the menu-bar UI.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,6 +125,7 @@ enum ServiceType {
 
 #[derive(new)]
 struct Tunnel {
+    env: Env,
     service: String,
     port: u16,
     #[new(default)]
@@ -81,7 +137,7 @@ impl Tunnel {
     /// the supervisor can turn a spawn failure into a visible Error state.
     fn start(&mut self) -> anyhow::Result<()> {
         let child = Command::new("b2c2")
-            .args(["tunnel", "-e", "prod", "-s", &self.service, "-p"])
+            .args(["tunnel", "-e", self.env.name(), "-s", &self.service, "-p"])
             .arg(self.port.to_string())
             // Run b2c2 (and the aws-cli + session-manager-plugin it spawns) in
             // its own process group, so teardown can signal exactly this
@@ -176,14 +232,22 @@ impl Service {
     }
 }
 
-fn build_specs(write_mode: bool) -> Vec<(String, u16, ServiceType)> {
-    let suffix = if write_mode { "" } else { "replica" };
-    vec![
-        (format!("primaryredis{suffix}"), 6001, ServiceType::Redis),
-        (format!("secondaryredis{suffix}"), 6002, ServiceType::Redis),
-        (format!("optionsredis{suffix}"), 6003, ServiceType::Redis),
-        ("optionsconfigdb".to_string(), 5608, ServiceType::Postgres),
-    ]
+fn build_specs(env: Env, write_mode: bool) -> Vec<(String, u16, ServiceType)> {
+    let suffix = if env.allows_write() && !write_mode {
+        "replica"
+    } else {
+        ""
+    };
+    let [primary, secondary, options] = env.redis_ports();
+    let mut specs = vec![
+        (format!("primaryredis{suffix}"), primary, ServiceType::Redis),
+        (format!("secondaryredis{suffix}"), secondary, ServiceType::Redis),
+        (format!("optionsredis{suffix}"), options, ServiceType::Redis),
+    ];
+    if let Some(port) = env.configdb_port() {
+        specs.push(("optionsconfigdb".to_string(), port, ServiceType::Postgres));
+    }
+    specs
 }
 
 /// Send `sig` (e.g. "TERM" / "KILL") to an entire process group. The group id
@@ -257,6 +321,20 @@ fn is_logged_in() -> bool {
     }
 }
 
+/// Serialises the auth check + login across workers, so two environments
+/// noticing an expired SSO session together open only one browser login.
+static LOGIN_LOCK: Mutex<()> = Mutex::new(());
+
+fn ensure_logged_in(env: Env, report: &impl Fn(Event)) -> bool {
+    let _guard = LOGIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if is_logged_in() {
+        return true;
+    }
+    report(Event::Status(Status::LoggingIn));
+    env.notify("AWS session expired — opening login…");
+    login() && is_logged_in()
+}
+
 /// Run interactive `b2c2 aws login` (opens a browser in the GUI session).
 fn login() -> bool {
     matches!(
@@ -307,7 +385,7 @@ enum SessionEnd {
 ///
 /// `report` is called on every state transition (and on the write-mode
 /// auto-revert) so the UI can update the icon, menu text, and checkbox.
-pub fn run<R: Fn(Event)>(cmd_rx: Receiver<Cmd>, report: R) {
+pub fn run<R: Fn(Event)>(env: Env, cmd_rx: Receiver<Cmd>, report: R) {
     let mut write_mode = false;
     // Absolute instant at which write mode reverts to read-only. Held across
     // reconnects so a dropped tunnel doesn't reset the 30-minute clock.
@@ -319,7 +397,7 @@ pub fn run<R: Fn(Event)>(cmd_rx: Receiver<Cmd>, report: R) {
         loop {
             match cmd_rx.recv() {
                 Ok(Cmd::Start) => break,
-                Ok(Cmd::SetWriteMode(w)) => write_mode = w,
+                Ok(Cmd::SetWriteMode(w)) => write_mode = w && env.allows_write(),
                 Ok(Cmd::Stop) => {}
                 Ok(Cmd::Quit) | Err(_) => return,
             }
@@ -339,26 +417,17 @@ pub fn run<R: Fn(Event)>(cmd_rx: Receiver<Cmd>, report: R) {
 
             report(Event::Status(Status::Starting));
 
-            // Ensure we're authenticated.
-            if !is_logged_in() {
-                report(Event::Status(Status::LoggingIn));
-                notify("Tunnel", "AWS session expired — opening login…");
-                if !login() || !is_logged_in() {
-                    report(Event::Status(Status::NeedsLogin));
-                    notify(
-                        "Tunnel",
-                        "AWS login required. Open the menu and press Start.",
-                    );
-                    // Give up this session; wait for a fresh command.
-                    continue 'idle;
-                }
+            if !ensure_logged_in(env, &report) {
+                report(Event::Status(Status::NeedsLogin));
+                env.notify("AWS login required. Open the menu and press Start.");
+                continue 'idle;
             }
 
-            match start_and_monitor(write_mode, write_deadline, &cmd_rx, &report) {
+            match start_and_monitor(env, write_mode, write_deadline, &cmd_rx, &report) {
                 SessionEnd::Stopped => continue 'idle,
                 SessionEnd::Quit => return,
                 SessionEnd::Restart(w) => {
-                    write_mode = w;
+                    write_mode = w && env.allows_write();
                     backoff = 1;
                     continue 'session;
                 }
@@ -366,25 +435,19 @@ pub fn run<R: Fn(Event)>(cmd_rx: Receiver<Cmd>, report: R) {
                     write_mode = false;
                     write_deadline = None;
                     report(Event::WriteMode(false));
-                    notify(
-                        "Tunnel",
-                        "Write mode expired after 30 min — reverting to read-only.",
-                    );
+                    env.notify("Write mode expired after 30 min — reverting to read-only.");
                     backoff = 1;
                     continue 'session;
                 }
                 SessionEnd::Failed(reason) => {
                     report(Event::Status(Status::Reconnecting));
-                    notify(
-                        "Tunnel",
-                        &format!("Connection lost ({reason}); reconnecting…"),
-                    );
+                    env.notify(&format!("Connection lost ({reason}); reconnecting…"));
                     // Interruptible backoff so Stop/Quit stay responsive.
                     match sleep_watching(&cmd_rx, backoff) {
                         Some(SessionEnd::Stopped) => continue 'idle,
                         Some(SessionEnd::Quit) => return,
                         Some(SessionEnd::Restart(w)) => {
-                            write_mode = w;
+                            write_mode = w && env.allows_write();
                             backoff = 1;
                             continue 'session;
                         }
@@ -400,12 +463,13 @@ pub fn run<R: Fn(Event)>(cmd_rx: Receiver<Cmd>, report: R) {
 
 /// Start all tunnels, then poll health + commands until something ends it.
 fn start_and_monitor<R: Fn(Event)>(
+    env: Env,
     write_mode: bool,
     write_deadline: Option<Instant>,
     cmd_rx: &Receiver<Cmd>,
     report: &R,
 ) -> SessionEnd {
-    let specs = build_specs(write_mode);
+    let specs = build_specs(env, write_mode);
     // Clear any leftover listener on one of our own ports before spawning, so a
     // tunnel stranded by a previous run can't make the fresh one fail to bind
     // and drive an endless reconnect loop.
@@ -415,7 +479,7 @@ fn start_and_monitor<R: Fn(Event)>(
     let mut tunnels: Vec<Tunnel> = Vec::new();
     let mut services: Vec<Service> = Vec::new();
     for (service, port, kind) in specs {
-        let mut tunnel = Tunnel::new(service, port);
+        let mut tunnel = Tunnel::new(env, service, port);
         if let Err(e) = tunnel.start() {
             for mut t in tunnels {
                 t.kill();
@@ -423,7 +487,7 @@ fn start_and_monitor<R: Fn(Event)>(
             report(Event::Status(Status::Error(format!(
                 "failed to launch b2c2: {e}"
             ))));
-            notify("Tunnel", "Failed to launch b2c2 tunnel. Is b2c2 on PATH?");
+            env.notify("Failed to launch b2c2 tunnel. Is b2c2 on PATH?");
             return SessionEnd::Failed("spawn failed".into());
         }
         tunnels.push(tunnel);
